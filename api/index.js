@@ -236,8 +236,8 @@ async function handleSubtitles(request, url) {
   return handleSubtitleSearch(url);
 }
 
-function jsonError(msg) {
-  return new Response(JSON.stringify({ error: msg }), { status: 200, headers: corsHeaders() });
+function jsonError(msg, status) {
+  return new Response(JSON.stringify({ error: msg }), { status: status || 200, headers: corsHeaders() });
 }
 
 function dlHeaders(filename, contentType) {
@@ -287,9 +287,9 @@ async function fetchArray(u) {
 
 async function proxyFile(u, filename) {
   const fr = await fetchArray(u);
-  if (!fr.ok) return jsonError('文件下载失败（HTTP ' + fr.status + '）');
-  const ct = fr.resp.headers.get('content-type') || 'application/octet-stream';
-  return new Response(fr.bytes, { status: 200, headers: dlHeaders(filename, ct) });
+  if (!fr.ok) return jsonError('文件下载失败（HTTP ' + fr.status + '）', 502);
+  // 强制中性 MIME：避免上游把字幕标成 application/json 时，iOS 按 MIME 把文件命名为 .json
+  return new Response(fr.bytes, { status: 200, headers: dlHeaders(filename, 'application/octet-stream') });
 }
 
 // ---- 搜索 ----
@@ -455,16 +455,16 @@ async function handleSubtitleDownload(url) {
   const osKey = (url.searchParams.get('os') || '').trim();
 
   if (source === 'assrt') {
-    if (!assrtToken) return jsonError('缺少伪射手 Token');
-    if (!id) return jsonError('缺少字幕 id');
+    if (!assrtToken) return jsonError('缺少伪射手 Token', 400);
+    if (!id) return jsonError('缺少字幕 id', 400);
     const du = 'https://api.assrt.net/v1/sub/detail?id=' + encodeURIComponent(id) + '&token=' + encodeURIComponent(assrtToken);
     const res = await fetchJson(du, { 'Authorization': 'Bearer ' + assrtToken });
-    if (res.err) return jsonError('伪射手详情：' + res.err);
+    if (res.err) return jsonError('伪射手详情：' + res.err, 502);
     const j = res.json || {};
-    if (j.status !== 0) return jsonError('伪射手详情：' + (j.errmsg || j.msg || '失败'));
+    if (j.status !== 0) return jsonError('伪射手详情：' + (j.errmsg || j.msg || '失败'), 502);
     // 伪射手详情：filelist 在 j.sub.subs[0].filelist（也可能在 j.sub.filelist / j.filelist）
     const filelist = extractAssrtFilelist(j);
-    if (!filelist.length) return jsonError('伪射手未返回可下载文件');
+    if (!filelist.length) return jsonError('伪射手未返回可下载文件', 404);
     if (filelist.length === 1) {
       const f = filelist[0];
       return proxyFile(f.url, f.f || f.file || (name + '.' + (ext || 'srt')));
@@ -476,15 +476,15 @@ async function handleSubtitleDownload(url) {
       if (!fr.ok) continue;
       parts.push({ name: filelist[i].f || filelist[i].file || ('file' + (i + 1)), bytes: fr.bytes });
     }
-    if (!parts.length) return jsonError('伪射手文件下载失败');
+    if (!parts.length) return jsonError('伪射手文件下载失败', 502);
     const zip = makeZip(parts);
     const fn = (name || 'subtitles') + '.zip';
     return new Response(zip, { status: 200, headers: dlHeaders(fn, 'application/zip') });
   }
 
   if (source === 'os') {
-    if (!osKey) return jsonError('缺少 OpenSubtitles Key');
-    if (!id) return jsonError('缺少字幕 id');
+    if (!osKey) return jsonError('缺少 OpenSubtitles Key', 400);
+    if (!id) return jsonError('缺少字幕 id', 400);
     const res = await fetchJson('https://api.opensubtitles.com/api/v1/download', {
       'Api-Key': osKey,
       'Accept': 'application/json',
@@ -493,14 +493,14 @@ async function handleSubtitleDownload(url) {
       method: 'POST',
       body: JSON.stringify({ file_id: Number(id) })
     });
-    if (res.err) return jsonError('OpenSubtitles 下载：' + res.err);
+    if (res.err) return jsonError('OpenSubtitles 下载：' + res.err, 502);
     const link = res.json && res.json.link;
     const fn = (res.json && res.json.file_name) || (name + '.' + (ext || 'srt'));
-    if (!link) return jsonError('OpenSubtitles 未返回下载链接（可能已达每日 100 次下载限额）');
+    if (!link) return jsonError('OpenSubtitles 未返回下载链接（可能已达每日 100 次下载限额）', 502);
     return proxyFile(link, fn);
   }
 
-  return jsonError('未知字幕源：' + source);
+  return jsonError('未知字幕源：' + source, 400);
 }
 
 // ---- 工具 ----
