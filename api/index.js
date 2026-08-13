@@ -340,7 +340,7 @@ async function searchAssrt(q, year, lang, token) {
   const j = res.json || {};
   // 伪射手 v1 成功用 status===0，失败用 errmsg；数组字段是 sub（不是 items）
   if (j.status !== 0) return { source: 'assrt', error: '伪射手返回：' + (j.errmsg || j.msg || '失败') };
-  const subs = j.sub || j.items || [];
+  const subs = extractAssrtSubs(j);
   const items = subs.map(function (it) {
     const files = it.filelist || [];
     const firstFile = files[0] ? files[0].file : '';
@@ -361,7 +361,27 @@ async function searchAssrt(q, year, lang, token) {
   return { source: 'assrt', items: items };
 }
 
-// 伪射手的 lang 字段形态多变：可能是字符串 key（chn）、对象 {desc,key}、或 { "1": {desc,key} } 等
+// 伪射手 v1 的 sub 字段形态多变：可能是 {subs:[...]}、数组、或顶层 {subs:[...]}/{items:[...]}
+// 参考官方文档与 WebMediaManager 集成：真正的结果数组在 j.sub.subs
+function extractAssrtSubs(j) {
+  const section = j.sub;
+  if (Array.isArray(section)) return section;
+  if (section && Array.isArray(section.subs)) return section.subs;
+  if (Array.isArray(j.subs)) return j.subs;
+  if (Array.isArray(j.items)) return j.items;
+  return [];
+}
+
+function extractAssrtFilelist(j) {
+  // 下载详情：filelist 常见在 j.sub.subs[0].filelist；也可能在 j.sub.filelist / j.filelist
+  const sub = j.sub;
+  if (sub) {
+    if (sub.subs && sub.subs[0] && Array.isArray(sub.subs[0].filelist)) return sub.subs[0].filelist;
+    if (Array.isArray(sub.filelist)) return sub.filelist;
+  }
+  if (Array.isArray(j.filelist)) return j.filelist;
+  return [];
+}
 function assrtLang(langField) {
   let desc = '', key = '';
   if (typeof langField === 'string') { key = langField; desc = langField; }
@@ -425,19 +445,19 @@ async function handleSubtitleDownload(url) {
     if (res.err) return jsonError('伪射手详情：' + res.err);
     const j = res.json || {};
     if (j.status !== 0) return jsonError('伪射手详情：' + (j.errmsg || j.msg || '失败'));
-    // 伪射手详情：文件列表在 sub.filelist（不是顶层 filelist / item.filelist）
-    const filelist = (j.sub && j.sub.filelist) || j.filelist || [];
+    // 伪射手详情：filelist 在 j.sub.subs[0].filelist（也可能在 j.sub.filelist / j.filelist）
+    const filelist = extractAssrtFilelist(j);
     if (!filelist.length) return jsonError('伪射手未返回可下载文件');
     if (filelist.length === 1) {
       const f = filelist[0];
-      return proxyFile(f.url, f.file || (name + '.' + (ext || 'srt')));
+      return proxyFile(f.url, f.f || f.file || (name + '.' + (ext || 'srt')));
     }
     // 多文件 → 打包为 store 模式 zip
     const parts = [];
     for (let i = 0; i < filelist.length; i++) {
       const fr = await fetchArray(filelist[i].url);
       if (!fr.ok) continue;
-      parts.push({ name: filelist[i].file || ('file' + (i + 1)), bytes: fr.bytes });
+      parts.push({ name: filelist[i].f || filelist[i].file || ('file' + (i + 1)), bytes: fr.bytes });
     }
     if (!parts.length) return jsonError('伪射手文件下载失败');
     const zip = makeZip(parts);
