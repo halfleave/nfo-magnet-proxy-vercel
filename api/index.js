@@ -341,7 +341,7 @@ async function searchAssrt(q, year, lang, token) {
   for (let pi = 0; pi < pages.length; pi++) {
     const u = 'https://api.assrt.net/v1/sub/search?token=' + encodeURIComponent(token)
       + '&q=' + encodeURIComponent(apiq)
-      + '&pos=' + pages[pi] + '&cnt=15';
+      + '&pos=' + pages[pi] + '&cnt=15&filelist=1';
     const res = await fetchJson(u, auth);
     if (res.err) { lastErr = '伪射手请求失败：' + res.err; continue; }
     const j = res.json || {};
@@ -360,7 +360,7 @@ async function searchAssrt(q, year, lang, token) {
   all = all.filter(function (it) { const k = String(it.id); if (seen[k]) return false; seen[k] = 1; return true; });
   const items = all.map(function (it) {
     const files = it.filelist || [];
-    const firstFile = files[0] ? files[0].file : '';
+    const firstFile = files[0] ? (files[0].f || files[0].file || '') : '';
     const ext = firstFile ? extOf(firstFile) : (files.length > 1 ? 'zip' : 'srt');
     const li = assrtLang(it.lang);
     return {
@@ -390,14 +390,29 @@ function extractAssrtSubs(j) {
 }
 
 function extractAssrtFilelist(j) {
-  // 下载详情：filelist 常见在 j.sub.subs[0].filelist；也可能在 j.sub.filelist / j.filelist
+  // 下载详情：filelist 在 j.sub.subs[].filelist，每项 { f:文件名, url:下载地址 }。
+  // 多源兼容：filelist 可能叫 files / file_list；subs 也可能就在顶层 j.subs。
+  const out = [];
+  const collect = function (arr) {
+    if (!Array.isArray(arr)) return;
+    for (const f of arr) {
+      if (!f || typeof f !== 'object') continue;
+      const url = f.url || f.d || f.link || f.download || '';
+      const fname = f.f || f.file || f.filename || f.name || '';
+      if (url || fname) out.push({ f: fname, url: url });
+    }
+  };
   const sub = j.sub;
   if (sub) {
-    if (sub.subs && sub.subs[0] && Array.isArray(sub.subs[0].filelist)) return sub.subs[0].filelist;
-    if (Array.isArray(sub.filelist)) return sub.filelist;
+    if (sub.subs && Array.isArray(sub.subs)) {
+      for (const s of sub.subs) { if (s && typeof s === 'object') collect(s.filelist || s.files || s.file_list); }
+    }
+    if (Array.isArray(sub.filelist)) collect(sub.filelist);
+    if (Array.isArray(sub.files)) collect(sub.files);
   }
-  if (Array.isArray(j.filelist)) return j.filelist;
-  return [];
+  if (Array.isArray(j.filelist)) collect(j.filelist);
+  if (Array.isArray(j.subs)) for (const s of j.subs) { if (s && typeof s === 'object') collect(s.filelist || s.files); }
+  return out;
 }
 function assrtLang(langField) {
   let desc = '', key = '';
@@ -462,12 +477,34 @@ async function handleSubtitleDownload(url) {
     if (res.err) return jsonError('伪射手详情：' + res.err, 502);
     const j = res.json || {};
     if (j.status !== 0) return jsonError('伪射手详情：' + (j.errmsg || j.msg || '失败'), 502);
-    // 伪射手详情：filelist 在 j.sub.subs[0].filelist（也可能在 j.sub.filelist / j.filelist）
+    // 伪射手详情：filelist 在 j.sub.subs[].filelist（每项 {f,url}）；也可能只有单个压缩包 url
+    const subs = (j.sub && j.sub.subs) || [];
     const filelist = extractAssrtFilelist(j);
-    if (!filelist.length) return jsonError('伪射手未返回可下载文件', 404);
+    if (!filelist.length && subs[0] && subs[0].url) {
+      // 兜底：字幕包以单个压缩包 url 形式提供（无 filelist 明细）
+      filelist.push({ f: subs[0].filename || subs[0].native_name || name, url: subs[0].url });
+    }
+    if (!filelist.length) {
+      // 诊断：把详情响应结构摘要返回，便于定位伪射手真实格式
+      const sub = j.sub; const first = subs[0];
+      const diag = JSON.stringify({
+        status: j.status,
+        topKeys: Object.keys(j),
+        subType: sub == null ? 'null' : (Array.isArray(sub) ? 'array' : typeof sub),
+        subKeys: (sub && typeof sub === 'object' && !Array.isArray(sub)) ? Object.keys(sub) : undefined,
+        subsLen: Array.isArray(sub && sub.subs) ? sub.subs.length : 'n/a',
+        firstKeys: (first && typeof first === 'object') ? Object.keys(first) : 'n/a',
+        firstHasUrl: !!(first && first.url)
+      });
+      return jsonError('伪射手未返回可下载文件（诊断：' + diag + '）', 404);
+    }
     if (filelist.length === 1) {
       const f = filelist[0];
-      return proxyFile(f.url, f.f || f.file || (name + '.' + (ext || 'srt')));
+      const fn = f.f || f.file || (name + '.' + (ext || 'srt'));
+      // 若 url 指向压缩包，用 url 后缀覆盖，避免把 zip/7z 命名成 srt
+      const uext = extOf(f.url);
+      const finalName = (uext && !fn.toLowerCase().endsWith('.' + uext)) ? (name + '.' + uext) : fn;
+      return proxyFile(f.url, finalName);
     }
     // 多文件 → 打包为 store 模式 zip
     const parts = [];
