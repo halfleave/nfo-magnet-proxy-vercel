@@ -328,20 +328,37 @@ async function handleSubtitleSearch(url) {
 }
 
 async function searchAssrt(q, year, lang, token) {
-  // 名称.年份（用点，不用空格）
+  // 名称 年份（用空格，不用点）
   let apiq = q;
-  if (year) apiq += '.' + year;
+  if (year) apiq += ' ' + year;
   // 注意：伪射手 v1 搜索的 lang 筛选参数形态不稳定，且易把结果过滤为 0；
   // 这里不传 lang，由代理把全部语言返回，前端用彩色标签展示，语言胶囊只影响 OpenSubtitles。
-  const u = 'https://api.assrt.net/v1/sub/search?token=' + encodeURIComponent(token)
-    + '&q=' + encodeURIComponent(apiq);
-  const res = await fetchJson(u, { 'Authorization': 'Bearer ' + token });
-  if (res.err) return { source: 'assrt', error: '伪射手请求失败：' + res.err };
-  const j = res.json || {};
-  // 伪射手 v1 成功用 status===0，失败用 errmsg；数组字段是 sub（不是 items）
-  if (j.status !== 0) return { source: 'assrt', error: '伪射手返回：' + (j.errmsg || j.msg || '失败') };
-  const subs = extractAssrtSubs(j);
-  const items = subs.map(function (it) {
+  // 分页：pos=起始位置，cnt=数量（上限 15）。抓两页共最多 30 条，贴近网站结果量。
+  const auth = { 'Authorization': 'Bearer ' + token };
+  const pages = [0, 15];
+  let all = [];
+  let lastErr = null;
+  for (let pi = 0; pi < pages.length; pi++) {
+    const u = 'https://api.assrt.net/v1/sub/search?token=' + encodeURIComponent(token)
+      + '&q=' + encodeURIComponent(apiq)
+      + '&pos=' + pages[pi] + '&cnt=15';
+    const res = await fetchJson(u, auth);
+    if (res.err) { lastErr = '伪射手请求失败：' + res.err; continue; }
+    const j = res.json || {};
+    // 伪射手 v1 成功用 status===0，失败用 errmsg；数组字段是 sub（不是 items）
+    if (j.status !== 0) { lastErr = '伪射手返回：' + (j.errmsg || j.msg || '失败'); continue; }
+    const subs = extractAssrtSubs(j);
+    if (subs.length) all = all.concat(subs);
+    if (subs.length < 15) break; // 本页没满，无下一页
+  }
+  if (!all.length) {
+    if (lastErr) return { source: 'assrt', error: lastErr };
+    return { source: 'assrt', items: [] };
+  }
+  // 按 id 去重（两页可能重叠）
+  const seen = {};
+  all = all.filter(function (it) { const k = String(it.id); if (seen[k]) return false; seen[k] = 1; return true; });
+  const items = all.map(function (it) {
     const files = it.filelist || [];
     const firstFile = files[0] ? files[0].file : '';
     const ext = firstFile ? extOf(firstFile) : (files.length > 1 ? 'zip' : 'srt');
